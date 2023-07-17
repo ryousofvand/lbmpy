@@ -644,6 +644,113 @@ class DiffusionDirichlet(LbBoundary):
 # end class DiffusionDirichlet
 
 
+class NeumannFlux(LbBoundary):
+    """Flux boundary condition, enforcing specified flux at obstacle
+
+    Args:
+        flux: can either be a constant, an access into a field, or a callback function.
+                  The callback functions gets a numpy record array with members, 'x','y','z', 'dir' (direction)
+                  and 'flux' which has to be set to the desired flux of the corresponding link
+        adapt_flux_to_force: adapts the flux to the correct equilibrium when the lattice Boltzmann method holds
+                                 a forcing term. If no forcing term is set and adapt_flux_to_force is set to True
+                                 it has no effect.
+        dim: number of spatial dimensions
+        name: optional name of the boundary.
+    """
+
+    def __init__(self, flux, adapt_flux_to_force=False, dim=None, name=None, data_type='double'):
+        self._flux = flux
+        self._adaptFluxToForce = adapt_flux_to_force
+        if callable(self._flux) and not dim:
+            raise ValueError("When using a flux callback the dimension has to be specified with the dim parameter")
+        elif not callable(self._flux):
+            dim = len(flux)
+        self.dim = dim
+        self.data_type = data_type
+
+        super(NeumannFlux, self).__init__(name)
+
+    @property
+    def additional_data(self):
+        """ In case of the NeumannFlux boundary additional data is a flux vector. This vector is added to each cell to
+            realize flux profiles for the inlet."""
+        if self.flux_is_callable:
+            return [(f'flux_{i}', create_type(self.data_type)) for i in range(self.dim)]
+        else:
+            return []
+
+    @property
+    def additional_data_init_callback(self):
+        """Initialise additional data of the boundary. For an example see
+            `tutorial 02 <https://pycodegen.pages.i10git.cs.fau.de/lbmpy/notebooks/02_tutorial_boundary_setup.html>`_
+            or lbmpy.geometry.add_pipe_inflow_boundary"""
+        if callable(self._flux):
+            return self._flux
+
+    def get_additional_code_nodes(self, lb_method):
+        """Return a list of code nodes that will be added in the generated code before the index field loop.
+
+        Args:
+            lb_method: Lattice Boltzmann method. See :func:`lbmpy.creationfunctions.create_lb_method`
+
+        Returns:
+            list containing LbmWeightInfo and NeighbourOffsetArrays
+        """
+        return [LbmWeightInfo(lb_method, self.data_type), NeighbourOffsetArrays(lb_method.stencil)]
+
+    @property
+    def flux_is_callable(self):
+        """Returns True is flux is callable. This means the flux should be initialised via a callback function.
+        This is useful if the inflow flux should have a certain profile for instance"""
+        return callable(self._flux)
+
+    def __call__(self, f_out, f_in, dir_symbol, inv_dir, lb_method, index_field):
+        flux_from_idx_field = callable(self._flux)
+        flux = [index_field(f'flux_{i}') for i in range(self.dim)] if flux_from_idx_field else self._flux
+
+        assert self.dim == lb_method.dim, \
+            f"Dimension of NeumannFlux ({self.dim}) does not match dimension of method ({lb_method.dim})"
+
+        neighbor_offset = NeighbourOffsetArrays.neighbour_offset(dir_symbol, lb_method.stencil)
+
+        flux = tuple(flx_i.get_shifted(*neighbor_offset)
+                         if isinstance(flx_i, Field.Access) and not flux_from_idx_field
+                         else flx_i
+                         for flx_i in flux)
+
+        if self._adaptFluxToForce:
+            cqc = lb_method.conserved_quantity_computation
+            shifted_flux_eqs = cqc.equilibrium_input_equations_from_init_values(flux=flux)
+            shifted_flux_eqs = shifted_flux_eqs.new_without_subexpressions()
+            flux = [eq.rhs for eq in shifted_flux_eqs.new_filtered(cqc.flux_symbols).main_assignments]
+
+        c_s_sq = sp.Rational(1, 3)
+        weight_info = LbmWeightInfo(lb_method, data_type=self.data_type)
+        weight_of_direction = weight_info.weight_of_direction
+        flux_term = 2 / c_s_sq * sum([d_i * flx_i for d_i, flx_i in zip(neighbor_offset, flux)]) * weight_of_direction(
+            dir_symbol, lb_method)
+
+        # Better alternative: in conserved value computation
+        # rename what is currently called density to "virtual_density"
+        # provide a new quantity density, which is constant in case of incompressible models
+        if lb_method.conserved_quantity_computation.compressible:
+            cqc = lb_method.conserved_quantity_computation
+            density_symbol = sp.Symbol("rho")
+            pdf_field_accesses = [f_out(i) for i in range(len(lb_method.stencil))]
+            density_equations = cqc.output_equations_from_pdfs(pdf_field_accesses, {'density': density_symbol})
+            density_symbol = lb_method.conserved_quantity_computation.density_symbol
+            result = density_equations.all_assignments
+            result += [Assignment(f_in(inv_dir[dir_symbol]),
+                                  f_out(dir_symbol) - flux_term * density_symbol)]
+            return result
+        else:
+            return [Assignment(f_in(inv_dir[dir_symbol]),
+                               f_out(dir_symbol) - flux_term)]
+
+
+# end class NeumannFlux
+
+
 class NeumannByCopy(LbBoundary):
     """Neumann boundary condition which is implemented by coping the PDF values to achieve similar values at the fluid
        and the boundary node"""
