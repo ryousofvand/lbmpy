@@ -651,16 +651,16 @@ class NeumannFlux(LbBoundary):
         flux: can either be a constant, an access into a field, or a callback function.
                   The callback functions gets a numpy record array with members, 'x','y','z', 'dir' (direction)
                   and 'flux' which has to be set to the desired flux of the corresponding link
-        adapt_flux_to_force: adapts the flux to the correct equilibrium when the lattice Boltzmann method holds
-                                 a forcing term. If no forcing term is set and adapt_flux_to_force is set to True
+        adapt_flux_to_source: adapts the flux to the correct equilibrium when the lattice Boltzmann method holds
+                                 a source term. If no source term is set and adapt_flux_to_source is set to True
                                  it has no effect.
         dim: number of spatial dimensions
         name: optional name of the boundary.
     """
 
-    def __init__(self, flux, adapt_flux_to_force=False, dim=None, name=None, data_type='double'):
+    def __init__(self, flux, adapt_flux_to_source=False, dim=None, name=None, data_type='double'):
         self._flux = flux
-        self._adaptFluxToForce = adapt_flux_to_force
+        self._adaptFluxToSource = adapt_flux_to_source
         if callable(self._flux) and not dim:
             raise ValueError("When using a flux callback the dimension has to be specified with the dim parameter")
         elif not callable(self._flux):
@@ -718,11 +718,11 @@ class NeumannFlux(LbBoundary):
                          else flx_i
                          for flx_i in flux)
 
-        if self._adaptFluxToForce:
+        if self._adaptFluxToSource:
             cqc = lb_method.conserved_quantity_computation
-            shifted_flux_eqs = cqc.equilibrium_input_equations_from_init_values(flux=flux)
+            shifted_flux_eqs = cqc.equilibrium_input_equations_from_init_values(velocity=flux)
             shifted_flux_eqs = shifted_flux_eqs.new_without_subexpressions()
-            flux = [eq.rhs for eq in shifted_flux_eqs.new_filtered(cqc.flux_symbols).main_assignments]
+            flux = [eq.rhs for eq in shifted_flux_eqs.new_filtered(cqc.velocity_symbols).main_assignments]
 
         c_s_sq = sp.Rational(1, 3)
         weight_info = LbmWeightInfo(lb_method, data_type=self.data_type)
